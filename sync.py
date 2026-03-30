@@ -45,6 +45,10 @@ def fetch_ps_catalog():
                         name_en = game.get("nameEn", "").strip()
                         devices = game.get("device", [])
                         
+                        ageRating = game.get("ageRating", {}).get("description", "")
+                        if not ageRating:
+                            ageRating = game.get("ageRating", {}).get("name", "")
+                        
                         key = name.lower()
                         if key not in catalog_games:
                             catalog_games[key] = {
@@ -52,12 +56,37 @@ def fetch_ps_catalog():
                                 "nameEn": name_en,
                                 "device": devices,
                                 "tier": tier,
-                                "releaseDate": game.get("releaseDate", "")
+                                "releaseDate": game.get("releaseDate", ""),
+                                "genre": game.get("genre", []),
+                                "conceptUrl": game.get("conceptUrl", ""),
+                                "imageUrl": game.get("imageUrl", ""),
+                                "conceptId": game.get("conceptId", None),
+                                "productId": game.get("productId", ""),
+                                "streamingSupported": game.get("streamingSupported", False),
+                                "ageRating": ageRating
                             }
         except Exception as e:
             logging.error(f"Error fetching {cat}: {e}")
             
     return catalog_games
+
+def update_db_schema():
+    logging.info("Ensuring Notion database has all required properties...")
+    properties = {
+        "类型": {"multi_select": {}},
+        "发售日": {"date": {}},
+        "商店链接": {"url": {}},
+        "封面链接": {"url": {}},
+        "Concept ID": {"number": {"format": "number"}},
+        "Product ID": {"rich_text": {}},
+        "支持串流": {"checkbox": {}},
+        "年龄评级": {"select": {}}
+    }
+    try:
+        notion.databases.update(database_id=DATABASE_ID, properties=properties)
+        logging.info("Database schema updated successfully with full info properties.")
+    except APIResponseError as e:
+        logging.warning(f"Could not automatically update database schema: {e}")
 
 def get_title_property_name(page):
     props = page.get("properties", {})
@@ -109,7 +138,6 @@ def fetch_notion_games():
             
             props = page.get("properties", {})
             
-            # get en_name
             en_name = ""
             en_prop = props.get("英文名称", {})
             if en_prop.get("type") == "rich_text" and en_prop.get("rich_text"):
@@ -140,60 +168,92 @@ def fetch_notion_games():
     return notion_games, title_prop_name
 
 def sync_games():
+    update_db_schema()
     catalog_games = fetch_ps_catalog()
     notion_games, title_prop_name = fetch_notion_games()
     
     logging.info(f"Fetched {len(catalog_games)} games from PS Catalog.")
-    # notion_games counts title and en_name as keys, so actual unique games is smaller.
     
     added_count = 0
     updated_count = 0
+    full_info_update_count = 0
     
-    # 1. Add new games
+    catalog_names = set([g["name"].lower() for g in catalog_games.values()] + [g["nameEn"].lower() for g in catalog_games.values() if g["nameEn"]])
+    processed_ids = set()
+    
     for key, ps_game in catalog_games.items():
         name_key = ps_game["name"].lower()
         en_key = ps_game["nameEn"].lower()
         
-        if name_key not in notion_games and (not en_key or en_key not in notion_games):
-            logging.info(f"New Game Detected: {ps_game['name']} ({ps_game['tier']}) - Adding to Notion...")
+        # Build properties
+        properties = {
+            "档位": {"select": {"name": ps_game["tier"]}},
+            "状态": {"select": {"name": "在库"}},
+            "版本": {"multi_select": [{"name": dev} for dev in ps_game["device"] if dev]},
+            "类型": {"multi_select": [{"name": g} for g in ps_game["genre"] if g]},
+            "支持串流": {"checkbox": ps_game["streamingSupported"]}
+        }
+        
+        if ps_game["releaseDate"]:
+            properties["发售日"] = {"date": {"start": ps_game["releaseDate"][:10]}}
+        if ps_game["conceptUrl"]:
+            properties["商店链接"] = {"url": ps_game["conceptUrl"]}
+        if ps_game["imageUrl"]:
+            properties["封面链接"] = {"url": ps_game["imageUrl"]}
+        if ps_game["conceptId"]:
+            properties["Concept ID"] = {"number": int(ps_game["conceptId"])}
+        if ps_game["productId"]:
+            properties["Product ID"] = {"rich_text": [{"text": {"content": ps_game["productId"]}}]}
+        if ps_game["ageRating"]:
+            properties["年龄评级"] = {"select": {"name": ps_game["ageRating"][:100]}}
             
-            properties = {
-                title_prop_name: {
-                    "title": [{"text": {"content": ps_game["name"]}}]
-                },
-                "英文名称": {
-                    "rich_text": [{"text": {"content": ps_game["nameEn"]}}]
-                },
-                "档位": {
-                    "select": {"name": ps_game["tier"]}
-                },
-                "状态": {
-                    "select": {"name": "在库"}
-                },
-                "入库日期": {
-                    "date": {"start": datetime.utcnow().strftime("%Y-%m-%d")}
-                },
-                "版本": {
-                    "multi_select": [{"name": dev} for dev in ps_game["device"] if dev]
-                }
-            }
+        create_kwargs = {
+            "parent": {"database_id": DATABASE_ID},
+            "properties": dict(properties) # copy
+        }
+        # Add page cover if available
+        if ps_game["imageUrl"]:
+            create_kwargs["cover"] = {"type": "external", "external": {"url": ps_game["imageUrl"]}}
+        
+        if name_key not in notion_games and (not en_key or en_key not in notion_games):
+            # 1. ADD NEW GAME
+            logging.info(f"New Game Detected: {ps_game['name']} - Adding to Notion...")
+            create_kwargs["properties"][title_prop_name] = {"title": [{"text": {"content": ps_game["name"]}}]}
+            create_kwargs["properties"]["英文名称"] = {"rich_text": [{"text": {"content": ps_game["nameEn"]}}]}
+            create_kwargs["properties"]["入库日期"] = {"date": {"start": datetime.utcnow().strftime("%Y-%m-%d")}}
             
             try:
-                notion.pages.create(
-                    parent={"database_id": DATABASE_ID},
-                    properties=properties
-                )
+                notion.pages.create(**create_kwargs)
                 added_count += 1
             except APIResponseError as e:
                 logging.error(f"Failed to add {ps_game['name']}: {e}")
+        else:
+            # 2. UPDATE EXISTING GAME WITH FULL INFO
+            game_node = notion_games.get(name_key) or notion_games.get(en_key)
+            page_id = game_node["id"]
+            if page_id in processed_ids:
+                continue
+            processed_ids.add(page_id)
+            
+            existing_props = game_node["page"].get("properties", {})
+            needs_update = False
+            
+            # Simple check if "类型" exists and is empty, to trigger an update
+            if "类型" not in existing_props or not existing_props.get("类型", {}).get("multi_select"):
+                needs_update = True
                 
-    # 2. Update removed games
-    # Reverse map catalog to easily check if a notion game is still in the catalog
-    catalog_names = set([g["name"].lower() for g in catalog_games.values()] + [g["nameEn"].lower() for g in catalog_games.values() if g["nameEn"]])
-    
-    # Use a set for unique IDs to avoid processing the same page twice
-    processed_ids = set()
-    
+            if needs_update:
+                logging.info(f"Updating full info for existing game: {ps_game['name']}")
+                update_kwargs = {"page_id": page_id, "properties": properties}
+                if ps_game["imageUrl"]:
+                    update_kwargs["cover"] = {"type": "external", "external": {"url": ps_game["imageUrl"]}}
+                try:
+                    notion.pages.update(**update_kwargs)
+                    full_info_update_count += 1
+                except APIResponseError as e:
+                    logging.error(f"Failed to update full info for {ps_game['name']}: {e}")
+
+    # 3. Handle removed games
     for key, notion_game in notion_games.items():
         page_id = notion_game["id"]
         if page_id in processed_ids:
@@ -205,7 +265,6 @@ def sync_games():
             en_prop = notion_game["page"].get("properties", {}).get("英文名称", {})
             en_name = en_prop.get("rich_text", [{}])[0].get("plain_text", "").strip() if en_prop.get("rich_text") else ""
             
-            # Check if it exists in the currently fetched catalog
             if title.lower() not in catalog_names and (not en_name or en_name.lower() not in catalog_names):
                 logging.info(f"Game Left Catalog: {title} - Updating Status to 已出库...")
                 try:
@@ -220,7 +279,7 @@ def sync_games():
                 except APIResponseError as e:
                     logging.error(f"Failed to update {title}: {e}")
                     
-    logging.info(f"Sync complete. Added: {added_count}, Updated to left catalog: {updated_count}.")
+    logging.info(f"Sync complete. Added: {added_count}, Full Info Updated: {full_info_update_count}, Updated to Left Catalog: {updated_count}.")
 
 if __name__ == "__main__":
     sync_games()
