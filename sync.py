@@ -17,7 +17,7 @@ if not NOTION_TOKEN or not DATABASE_ID:
     logging.error("Missing NOTION_API_KEY or NOTION_DATABASE_ID in .env/environment")
     exit(1)
 
-notion = Client(auth=NOTION_TOKEN, notion_version="2025-09-03")
+notion = Client(auth=NOTION_TOKEN, notion_version="2022-06-28")
 
 def fetch_ps_catalog():
     categories = {
