@@ -16,19 +16,24 @@
    ```
    编辑 `.env` 文件：
    - `NOTION_API_KEY`: 你的 Notion Integration 密钥 (格式如 `ntn_...`)。
-   - `NOTION_DATABASE_ID`: 你的“二档/三档订阅库”数据库 ID。可以在浏览器打开该库，复制 URL 中 `?v=` 前的 32 位字符。
+   - `NOTION_DATA_SOURCE_ID`: 你的“二档/三档订阅库”数据源 ID。请在 Notion 数据库的“管理数据源”菜单中使用“复制数据源 ID”；不要填写页面 URL 中的数据库 ID 或视图 ID。
 
 3. 使用 Docker Compose 运行：
    ```bash
-   docker-compose up --build
+   docker compose up --build
    ```
    
 > **提示**: 运行后会在终端看到同步日志，告诉你新增了几款游戏，移出了几款游戏。
 
-## GitHub Actions 自动运行 (可选)
+脚本使用 Notion `2025-09-03` Data Sources API。同步前会校验订阅库的核心字段，避免误把一档会免库或其他数据库当作同步目标。`最后更新时间` 只在游戏新增、资料发生变化或出库时写入当前 UTC 时间；脚本不会自动回填历史数据。
 
-如果你希望完全自动化（例如每个月 20 号自动同步一次），你可以将这个代码仓库推送到你的私人 GitHub 仓库，并在 `Settings -> Secrets and variables -> Actions` 中配置以下环境变量：
+## GitHub Actions 自动运行
+
+仓库内置的 [`.github/workflows/sync.yml`](.github/workflows/sync.yml) 会在北京时间每月 11 日到 25 日的每天 23:00 自动同步，也可以在 GitHub 的 `Actions` 页面手动触发。
+
+在仓库的 `Settings -> Secrets and variables -> Actions` 中配置以下 Repository secrets：
+
 - `NOTION_API_KEY`
-- `NOTION_DATABASE_ID`
+- `NOTION_DATA_SOURCE_ID`
 
-然后创建一个 `.github/workflows/sync.yml` 文件来定期触发 `python sync.py`。
+工作流使用只读的 `GITHUB_TOKEN` 权限，先安装依赖并运行测试，再执行 `python sync.py`。同一时间只允许一个同步任务运行，避免重复写入。
