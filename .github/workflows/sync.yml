@@ -2,8 +2,8 @@ name: Sync PS Plus catalog
 
 on:
   schedule:
-    # GitHub cron uses UTC. 15:00 UTC is 23:00 in Asia/Shanghai.
-    - cron: "0 15 11-25 * *"
+    # GitHub cron uses UTC. 6:00 UTC is 12:00 in Asia/Shanghai.
+    - cron: "0 6 11-25 * *"
   workflow_dispatch:
 
 permissions:
